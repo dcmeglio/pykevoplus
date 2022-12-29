@@ -1,2 +1,4 @@
-beautifulsoup4==4.5.1
-requests==2.20.0
+httpx>=0.23.0
+pkce>=1.0.3
+PyJWT>=2.5.0
+websockets>=10.4
