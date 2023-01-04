@@ -23,8 +23,15 @@ _LOGGER = logging.getLogger(__name__)
 from aiokevoplus.const import (
     CLIENT_ID,
     CLIENT_SECRET,
+    COMMAND_STATUS_CANCELLED,
+    COMMAND_STATUS_COMPLETE,
+    COMMAND_STATUS_DELIVERED,
+    COMMAND_STATUS_PROCESSING,
+    LOCK_STATE_JAM,
     LOCK_STATE_LOCK,
+    LOCK_STATE_LOCK_JAM,
     LOCK_STATE_UNLOCK,
+    LOCK_STATE_UNLOCK_JAM,
     TENANT_ID,
     UNIKEY_API_URL_BASE,
     UNIKEY_INVALID_LOGIN_URL,
@@ -42,6 +49,8 @@ class KevoAuthError(KevoError):
 
 
 class KevoApi:
+    MAX_RECONNECT_DELAY: int = 240
+
     def __init__(self, device_id=None):
         self._expires_at = 0
         self._refresh_token = None
@@ -154,6 +163,21 @@ class KevoApi:
         """Generate a client nonce."""
         return base64.b64encode(secrets.token_bytes(64)).decode()
 
+    async def __get_headers(self):
+        """Retrieve the headers needed to make api calls."""
+        cnonce = self.__get_client_nonce()
+        snonce = await self.__get_server_nonce()
+
+        headers = {
+            "X-unikey-cnonce": cnonce,
+            "X-unikey-context": "Web",
+            "X-unikey-nonce": snonce,
+            "Authorization": "Bearer " + self._access_token,
+            "Accept": "application/json",
+        }
+
+        return headers
+
     async def async_refresh_token(self):
         """Refresh the access token."""
         client = httpx.AsyncClient()
@@ -176,47 +200,73 @@ class KevoApi:
     async def _api_post(self, url, body):
         """POST to the API."""
         client = httpx.AsyncClient()
-        cnonce = self.__get_client_nonce()
-        snonce = await self.__get_server_nonce()
 
         # Reauth if needed
         if self._expires_at < time.time() + 100:
             await self.async_refresh_token()
 
-        headers = {
-            "X-unikey-cnonce": cnonce,
-            "X-unikey-context": "Web",
-            "X-unikey-nonce": snonce,
-            "Authorization": "Bearer " + self._access_token,
-            "Accept": "application/json",
-        }
+        headers = await self.__get_headers()
 
         res = await client.post(
             UNIKEY_API_URL_BASE + url,
             headers=headers,
             json=body,
         )
-        res.raise_for_status()
+        try:
+            res.raise_for_status()
+        except httpx.HTTPStatusError as ex:
+            if ex.response.status_code == 403:
+                await self.async_refresh_token()
+                headers = await self.__get_headers()
+                res = await client.post(
+                    UNIKEY_API_URL_BASE + url,
+                    headers=headers,
+                    json=body,
+                )
+                try:
+                    res.raise_for_status()
+                except httpx.HTTPStatusError as retryex:
+                    if retryex.response.status_code == 403:
+                        raise KevoAuthError()
+                    else:
+                        raise
+            else:
+                raise
         return res.json()
 
     async def get_locks(self):
         """Retrieve the list of available locks."""
         client = httpx.AsyncClient()
-        cnonce = self.__get_client_nonce()
-        snonce = await self.__get_server_nonce()
+        headers = await self.__get_headers()
 
-        headers = {
-            "X-unikey-cnonce": cnonce,
-            "X-unikey-context": "Web",
-            "X-unikey-nonce": snonce,
-            "Authorization": "Bearer " + self._access_token,
-            "Accept": "application/json",
-        }
+        # Reauth if needed
+        if self._expires_at < time.time() + 100:
+            await self.async_refresh_token()
+
         res = await client.get(
             UNIKEY_API_URL_BASE + "/api/v2/users/" + self._user_id + "/locks",
             headers=headers,
         )
-        res.raise_for_status()
+        try:
+            res.raise_for_status()
+        except httpx.HTTPStatusError as ex:
+            if ex.response.status_code == 403:
+                await self.async_refresh_token()
+                headers = await self.__get_headers()
+                res = await client.get(
+                    UNIKEY_API_URL_BASE + "/api/v2/users/" + self._user_id + "/locks",
+                    headers=headers,
+                )
+                try:
+                    res.raise_for_status()
+                except httpx.HTTPStatusError as retryex:
+                    if retryex.response.status_code == 403:
+                        raise KevoAuthError()
+                    else:
+                        raise
+                raise KevoAuthError()
+            else:
+                raise
         json_response = res.json()
         lock_response = json_response["locks"]
         self._devices = []
@@ -230,6 +280,7 @@ class KevoApi:
                     lock["firmwareVersion"],
                     lock["batteryLevel"],
                     lock["boltState"],
+                    lock["brand"],
                 )
             )
         return self._devices
@@ -346,14 +397,46 @@ class KevoApi:
                 if lock is not None:
                     lock.battery_level = message_body["batteryLevel"]
                     boltState = message_body["boltState"]
+                    command = message_body["command"]
+                    command_status = None
+                    if command is not None:
+                        command_status = command["status"]
                     if boltState == LOCK_STATE_LOCK:
-                        lock.lock_state = "Locked"
+                        lock.is_locked = True
+                        lock.is_jammed = False
                     elif boltState == LOCK_STATE_UNLOCK:
-                        lock.lock_state = "Unlocked"
+                        lock.is_locked = False
+                        lock.is_jammed = False
+                    elif boltState == LOCK_STATE_JAM:
+                        lock.is_jammed = True
+                    elif boltState == LOCK_STATE_LOCK_JAM:
+                        lock.is_jammed = True
+                        lock.is_locked = True
+                    elif boltState == LOCK_STATE_UNLOCK_JAM:
+                        lock.is_jammed = True
+                        lock.is_locked = False
                     else:
                         _LOGGER.warn("Unknown lock state %s", boltState)
-                        lock.lock_state = "Unknown"
+                        lock.is_jammed = None
+                        lock.is_locked = None
 
+                    if command_status is not None:
+                        if command_status in (
+                            COMMAND_STATUS_COMPLETE,
+                            COMMAND_STATUS_CANCELLED,
+                        ):
+                            lock.is_locking = False
+                            lock.is_unlocking = False
+                        elif command_status in (
+                            COMMAND_STATUS_PROCESSING,
+                            COMMAND_STATUS_DELIVERED,
+                        ):
+                            if command["type"] == LOCK_STATE_LOCK:
+                                lock.is_locking = True
+                                lock.is_unlocking = False
+                            else:
+                                lock.is_locking = False
+                                lock.is_unlocking = True
                     for callback in self._callbacks:
                         try:
                             callback(lock)
@@ -362,11 +445,29 @@ class KevoApi:
         except Exception as ex:
             _LOGGER.error("Exception occurred reading websocket message: %s", ex)
 
+    async def __websocket_reconnect(self):
+        """Reconnect to the websocket if an error occurs."""
+        self._reconnect_attempts += 1
+        reconnect_delay = 2**self._reconnect_attempts
+        if reconnect_delay > self.MAX_RECONNECT_DELAY:
+            reconnect_delay = self.MAX_RECONNECT_DELAY
+        await asyncio.sleep(reconnect_delay)
+        self._websocket_task = asyncio.create_task(self.__websocket_connect())
+
     async def __websocket_connect(self):
         """Connect to the websocket."""
         auth_token = quote(f"Bearer {self._access_token}", safe="!~*'()")
         cnonce = self.__get_client_nonce()
-        snonce = await self.__get_server_nonce()
+        snonce = None
+        try:
+            snonce = await self.__get_server_nonce()
+        except httpx.HTTPStatusError as ex:
+            raise
+        except:
+            _LOGGER.error("Failed to retrieve server nonce, retrying")
+            await self.__websocket_reconnect()
+            return
+
         verification = quote(
             self.__generate_websocket_verification(cnonce, snonce), safe="!~*'()"
         )
@@ -375,18 +476,25 @@ class KevoApi:
         query_string = f"?Authorization={auth_token}&X-unikey-context=web&X-unikey-cnonce={cnonce}&X-unikey-nonce={snonce}&X-unikey-request-verification={verification}&X-unikey-message-content-type=application%2Fjson&"
         async for websocket in websockets.connect(
             UNIKEY_WS_URL_BASE + "/v3/web/" + self._user_id + query_string,
-            ping_interval=None,
+            ping_interval=10,
             user_agent_header="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
         ):
+            self._reconnect_attempts = 0
             try:
                 async for message in websocket:
                     self.__process_message(message)
             except websockets.ConnectionClosed:
-                _LOGGER.error("Lost connection to websocket")
-                continue
+                _LOGGER.error("Lost connection to websocket, retrying")
+                await self.__websocket_reconnect()
+                return
+            except Exception as ex:
+                _LOGGER.error("Error on websocket, %s, retrying", ex)
+                await self.__websocket_reconnect()
+                return
 
     async def websocket_connect(self):
         """Connect to the websocket via a task."""
+        self._reconnect_attempts = 0
         if self._websocket_task is not None:
             self._websocket_task.cancel()
         self._websocket_task = asyncio.create_task(self.__websocket_connect())
@@ -402,13 +510,23 @@ class KevoApi:
 
 
 class KevoLock:
-    def __init__(self, api, lock_id, name, firmware, battery_level, state):
+    def __init__(self, api, lock_id, name, firmware, battery_level, state, brand):
         self._api = api
         self._lock_id = lock_id
         self._name = name
         self._firmware = firmware
         self._battery_level = battery_level
-        self._lock_state = state
+        self._is_locking = False
+        self._is_unlocking = False
+        if state in ("Locked", "LockedBoltJam"):
+            self._is_locked = True
+        else:
+            self._is_locked = False
+        if state in ("BoltJam", "UnlockedBoltJam", "LockedBoltJam"):
+            self._is_jammed = True
+        else:
+            self._is_jammed = False
+        self._brand = brand
 
     @property
     def lock_id(self):
@@ -441,14 +559,54 @@ class KevoLock:
         self._battery_level = value
 
     @property
-    def lock_state(self):
+    def is_locked(self):
         """Retrieve the lock state."""
-        return self._lock_state
+        return self._is_locked
 
-    @lock_state.setter
-    def lock_state(self, value):
+    @is_locked.setter
+    def is_locked(self, value):
         """Update the lock state."""
-        self._lock_state = value
+        self._is_locked = value
+
+    @property
+    def is_jammed(self):
+        """Retrieve the jammed state."""
+        return self._is_jammed
+
+    @is_jammed.setter
+    def is_jammed(self, value):
+        """Update the jammed state."""
+        self._is_jammed = value
+
+    @property
+    def is_locking(self):
+        """Retrieve the locking state."""
+        return self._is_locking
+
+    @is_locking.setter
+    def is_locking(self, value):
+        """Update the locking state."""
+        self._is_locking = value
+
+    @property
+    def is_unlocking(self):
+        """Retrieve the unlocking state."""
+        return self._is_unlocking
+
+    @is_unlocking.setter
+    def is_unlocking(self, value):
+        """Update the unlocking state."""
+        self._is_unlocking = value
+
+    @property
+    def brand(self):
+        """Retrieve the lock brand."""
+        return self._brand
+
+    @brand.setter
+    def brand(self, value):
+        """Update the lock brand."""
+        self._brand = value
 
     async def lock(self):
         """Lock the lock."""
