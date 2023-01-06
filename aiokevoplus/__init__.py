@@ -48,6 +48,10 @@ class KevoAuthError(KevoError):
     pass
 
 
+class KevoPermissionError(KevoError):
+    pass
+
+
 class KevoApi:
     MAX_RECONNECT_DELAY: int = 240
 
@@ -230,6 +234,8 @@ class KevoApi:
                         raise KevoAuthError()
                     else:
                         raise
+            elif ex.response.status_code == 401:
+                raise KevoPermissionError()
             else:
                 raise
         return res.json()
@@ -265,6 +271,8 @@ class KevoApi:
                     else:
                         raise
                 raise KevoAuthError()
+            elif ex.response.status_code == 401:
+                raise KevoPermissionError()
             else:
                 raise
         json_response = res.json()
