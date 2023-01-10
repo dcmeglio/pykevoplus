@@ -64,6 +64,8 @@ class KevoApi:
         self._device_id = device_id
         self._websocket_task = None
         self._callbacks = []
+        self._websocket = None
+        self._disconnecting = False
 
         if self._device_id is None:
             self._device_id = uuid.uuid4()
@@ -462,6 +464,14 @@ class KevoApi:
         await asyncio.sleep(reconnect_delay)
         self._websocket_task = asyncio.create_task(self.__websocket_connect())
 
+    async def websocket_close(self):
+        """Close the connection to the websocket."""
+        self._disconnecting = True
+        if self._websocket is not None:
+            await self._websocket.close()
+        if self._websocket_task is not None:
+            self._websocket_task.cancel()
+
     async def __websocket_connect(self):
         """Connect to the websocket."""
         auth_token = quote(f"Bearer {self._access_token}", safe="!~*'()")
@@ -488,12 +498,14 @@ class KevoApi:
             user_agent_header="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
         ):
             self._reconnect_attempts = 0
+            self._websocket = websocket
             try:
                 async for message in websocket:
                     self.__process_message(message)
             except websockets.ConnectionClosed:
-                _LOGGER.error("Lost connection to websocket, retrying")
-                await self.__websocket_reconnect()
+                if not self._disconnecting:
+                    _LOGGER.error("Lost connection to websocket, retrying")
+                    await self.__websocket_reconnect()
                 return
             except Exception as ex:
                 _LOGGER.error("Error on websocket, %s, retrying", ex)
@@ -503,6 +515,7 @@ class KevoApi:
     async def websocket_connect(self):
         """Connect to the websocket via a task."""
         self._reconnect_attempts = 0
+        self._disconnecting = False
         if self._websocket_task is not None:
             self._websocket_task.cancel()
         self._websocket_task = asyncio.create_task(self.__websocket_connect())
