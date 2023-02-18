@@ -11,6 +11,7 @@ import random
 import re
 import secrets
 import time
+from typing import Callable
 import uuid
 import httpx
 from urllib.parse import urlparse, parse_qs, quote
@@ -55,22 +56,22 @@ class KevoPermissionError(KevoError):
 class KevoApi:
     MAX_RECONNECT_DELAY: int = 240
 
-    def __init__(self, device_id=None):
+    def __init__(self, device_id: uuid.UUID = None):
         self._expires_at = 0
-        self._refresh_token = None
-        self._id_token = None
-        self._access_token = None
-        self._user_id = None
+        self._refresh_token: str = None
+        self._id_token: str = None
+        self._access_token: str = None
+        self._user_id: str = None
         self._device_id = device_id
-        self._websocket_task = None
-        self._callbacks = []
+        self._websocket_task: asyncio.Task = None
+        self._callbacks: list[Callable] = []
         self._websocket = None
         self._disconnecting = False
 
         if self._device_id is None:
             self._device_id = uuid.uuid4()
 
-    def __generate_websocket_verification(self, cnonce, snonce):
+    def __generate_websocket_verification(self, cnonce: str, snonce: str) -> str:
         """Generate the verification value used to connect to the websocket."""
         snonce_bytes = base64.b64decode(snonce)
         cnonce_bytes = base64.b64decode(cnonce)
@@ -82,10 +83,10 @@ class KevoApi:
 
         return base64.b64encode(sign).decode()
 
-    def __generate_certificate(self):
+    def __generate_certificate(self) -> str:
         """Generate a device certificate."""
 
-        def int_val(byte_val):
+        def int_val(byte_val: int) -> list:
             e = []
             r = 0
             while True:
@@ -96,7 +97,7 @@ class KevoApi:
                     break
             return e
 
-        def short_val(byte_val):
+        def short_val(byte_val: int) -> list:
             e = []
             r = 0
             while True:
@@ -107,13 +108,13 @@ class KevoApi:
                     break
             return e
 
-        def random_bytes(byte_val):
+        def random_bytes(byte_val: int) -> list:
             e = []
             for _ in range(byte_val):
                 e.append(math.floor(255 * random.random()))
             return e
 
-        def uuid_to_bytes(guid: str):
+        def uuid_to_bytes(guid: str) -> list:
             guid_parts = guid.split("-")
             result_list = []
 
@@ -129,7 +130,7 @@ class KevoApi:
             [map_the_thing(element, index) for index, element in enumerate(guid_parts)]
             return list(reversed(result_list))
 
-        def length_encoded_bytes(byte_val, byte_array):
+        def length_encoded_bytes(byte_val, byte_array) -> list:
             result = [byte_val]
             result.extend(short_val(len(byte_array)))
             result.extend(byte_array)
@@ -153,7 +154,7 @@ class KevoApi:
         result = base64.b64encode(bytearray(s)).decode()
         return result
 
-    async def __get_server_nonce(self):
+    async def __get_server_nonce(self) -> str:
         """Retrieve a server nonce."""
         client = httpx.AsyncClient()
         client.headers = {"Content-Type": "application/json"}
@@ -165,11 +166,11 @@ class KevoApi:
 
         return res.headers["x-unikey-nonce"]
 
-    def __get_client_nonce(self):
+    def __get_client_nonce(self) -> str:
         """Generate a client nonce."""
         return base64.b64encode(secrets.token_bytes(64)).decode()
 
-    async def __get_headers(self):
+    async def __get_headers(self) -> dict:
         """Retrieve the headers needed to make api calls."""
         cnonce = self.__get_client_nonce()
         snonce = await self.__get_server_nonce()
@@ -184,7 +185,7 @@ class KevoApi:
 
         return headers
 
-    async def async_refresh_token(self):
+    async def async_refresh_token(self) -> None:
         """Refresh the access token."""
         client = httpx.AsyncClient()
         post_params = {
@@ -203,7 +204,7 @@ class KevoApi:
         self._refresh_token = json_response["refresh_token"]
         self._expires_at = time.time() + json_response["expires_in"]
 
-    async def _api_post(self, url, body):
+    async def _api_post(self, url: str, body: dict):
         """POST to the API."""
         client = httpx.AsyncClient()
 
@@ -242,7 +243,7 @@ class KevoApi:
                 raise
         return res.json()
 
-    async def get_locks(self):
+    async def get_locks(self) -> list["KevoLock"]:
         """Retrieve the list of available locks."""
         client = httpx.AsyncClient()
         headers = await self.__get_headers()
@@ -295,7 +296,7 @@ class KevoApi:
             )
         return self._devices
 
-    async def login(self, username, password):
+    async def login(self, username: str, password: str) -> None:
         """Login to the API."""
         client = httpx.AsyncClient()
         code_verifier, code_challenge = pkce.generate_pkce_pair()
@@ -394,7 +395,7 @@ class KevoApi:
         else:
             res.raise_for_status()
 
-    def __process_message(self, message):
+    def __process_message(self, message: str) -> None:
         """Process a websocket message."""
         try:
             json_body = json.loads(message)
@@ -455,7 +456,7 @@ class KevoApi:
         except Exception as ex:
             _LOGGER.error("Exception occurred reading websocket message: %s", ex)
 
-    async def __websocket_reconnect(self):
+    async def __websocket_reconnect(self) -> None:
         """Reconnect to the websocket if an error occurs."""
         self._reconnect_attempts += 1
         reconnect_delay = 2**self._reconnect_attempts
@@ -464,7 +465,7 @@ class KevoApi:
         await asyncio.sleep(reconnect_delay)
         self._websocket_task = asyncio.create_task(self.__websocket_connect())
 
-    async def websocket_close(self):
+    async def websocket_close(self) -> None:
         """Close the connection to the websocket."""
         self._disconnecting = True
         if self._websocket is not None:
@@ -472,7 +473,7 @@ class KevoApi:
         if self._websocket_task is not None:
             self._websocket_task.cancel()
 
-    async def __websocket_connect(self):
+    async def __websocket_connect(self) -> None:
         """Connect to the websocket."""
         auth_token = quote(f"Bearer {self._access_token}", safe="!~*'()")
         cnonce = self.__get_client_nonce()
@@ -512,7 +513,7 @@ class KevoApi:
                 await self.__websocket_reconnect()
                 return
 
-    async def websocket_connect(self):
+    async def websocket_connect(self) -> asyncio.Task:
         """Connect to the websocket via a task."""
         self._reconnect_attempts = 0
         self._disconnecting = False
@@ -521,17 +522,31 @@ class KevoApi:
         self._websocket_task = asyncio.create_task(self.__websocket_connect())
         return self._websocket_task
 
-    def register_callback(self, callback=lambda *args, **kwargs: None):
+    def register_callback(self, callback: Callable) -> Callable:
         """Add a callback to be triggered when an event is received."""
-        self._callbacks.append(callback)
 
-    def unregister_callback(self, callback=lambda *args, **kwargs: None):
+        def unregister_callback() -> None:
+            self._callbacks.remove(callback)
+
+        self._callbacks.append(callback)
+        return unregister_callback
+
+    def unregister_callback(self, callback: Callable) -> None:
         """Remove a callback that gets triggered when an event is received."""
         self._callbacks.remove(callback)
 
 
 class KevoLock:
-    def __init__(self, api, lock_id, name, firmware, battery_level, state, brand):
+    def __init__(
+        self,
+        api: KevoApi,
+        lock_id: str,
+        name: str,
+        firmware: str,
+        battery_level: float,
+        state: str,
+        brand: str,
+    ):
         self._api = api
         self._lock_id = lock_id
         self._name = name
@@ -550,84 +565,89 @@ class KevoLock:
         self._brand = brand
 
     @property
-    def lock_id(self):
+    def lock_id(self) -> str:
         """Retrieve the lock id."""
         return self._lock_id
 
     @property
-    def name(self):
+    def name(self) -> str:
         """Retrieve the lock name."""
         return self._name
 
     @property
-    def firmware(self):
+    def firmware(self) -> str:
         """Retrieve the firmware version."""
         return self._firmware
 
     @firmware.setter
-    def firmware(self, value):
+    def firmware(self, value: str):
         """Update the firmware version."""
         self._firmware = value
 
     @property
-    def battery_level(self):
+    def battery_level(self) -> float:
         """Retrieve the battery level on a scale of 0.0 to 1.0"""
         return self._battery_level
 
     @battery_level.setter
-    def battery_level(self, value):
+    def battery_level(self, value: float):
         """Update the battery level."""
         self._battery_level = value
 
     @property
-    def is_locked(self):
+    def is_locked(self) -> bool:
         """Retrieve the lock state."""
         return self._is_locked
 
     @is_locked.setter
-    def is_locked(self, value):
+    def is_locked(self, value: bool):
         """Update the lock state."""
         self._is_locked = value
 
     @property
-    def is_jammed(self):
+    def is_jammed(self) -> bool:
         """Retrieve the jammed state."""
         return self._is_jammed
 
     @is_jammed.setter
-    def is_jammed(self, value):
+    def is_jammed(self, value: bool):
         """Update the jammed state."""
         self._is_jammed = value
 
     @property
-    def is_locking(self):
+    def is_locking(self) -> bool:
         """Retrieve the locking state."""
         return self._is_locking
 
     @is_locking.setter
-    def is_locking(self, value):
+    def is_locking(self, value: bool):
         """Update the locking state."""
         self._is_locking = value
 
     @property
-    def is_unlocking(self):
+    def is_unlocking(self) -> bool:
         """Retrieve the unlocking state."""
         return self._is_unlocking
 
     @is_unlocking.setter
-    def is_unlocking(self, value):
+    def is_unlocking(self, value: bool):
         """Update the unlocking state."""
         self._is_unlocking = value
 
     @property
-    def brand(self):
+    def brand(self) -> str:
         """Retrieve the lock brand."""
         return self._brand
 
     @brand.setter
-    def brand(self, value):
+    def brand(self, value: str):
         """Update the lock brand."""
         self._brand = value
+
+    @property
+    def api(self) -> KevoApi:
+        """Access the underlying api."""
+        return self._api
 
     async def lock(self):
         """Lock the lock."""
