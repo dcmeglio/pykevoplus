@@ -204,8 +204,8 @@ class KevoApi:
         self._refresh_token = json_response["refresh_token"]
         self._expires_at = time.time() + json_response["expires_in"]
 
-    async def _api_post(self, url: str, body: dict):
-        """POST to the API."""
+    async def _api_request(self, method: str, url: str, body: dict = None) -> dict:
+        """Send request to the API."""
         client = httpx.AsyncClient()
 
         # Reauth if needed
@@ -214,7 +214,8 @@ class KevoApi:
 
         headers = await self.__get_headers()
 
-        res = await client.post(
+        res = await client.request(
+            method,
             UNIKEY_API_URL_BASE + url,
             headers=headers,
             json=body,
@@ -225,7 +226,8 @@ class KevoApi:
             if ex.response.status_code == 403:
                 await self.async_refresh_token()
                 headers = await self.__get_headers()
-                res = await client.post(
+                res = await client.request(
+                    method,
                     UNIKEY_API_URL_BASE + url,
                     headers=headers,
                     json=body,
@@ -243,46 +245,35 @@ class KevoApi:
                 raise
         return res.json()
 
+    async def _api_get(self, url: str) -> dict:
+        """GET from the API."""
+        return await self._api_request("GET", url)
+
+
+    async def _api_post(self, url: str, body: dict) -> dict:
+        """POST to the API."""
+        return await self._api_request("POST", url, body)
+
+    async def get_lock(self, lock_id: str) -> "KevoLock":
+        """Retrieve a specific lock."""
+        lock = await self._api_get(f"/api/v2/locks/{lock_id}");
+        return KevoLock(
+            self,
+            lock["id"],
+            lock["name"],
+            lock["firmwareVersion"],
+            lock["batteryLevel"],
+            lock["boltState"],
+            lock["brand"],
+        )
+
     async def get_locks(self) -> list["KevoLock"]:
         """Retrieve the list of available locks."""
-        client = httpx.AsyncClient()
-        headers = await self.__get_headers()
-
-        # Reauth if needed
-        if self._expires_at < time.time() + 100:
-            await self.async_refresh_token()
-
-        res = await client.get(
-            UNIKEY_API_URL_BASE + "/api/v2/users/" + self._user_id + "/locks",
-            headers=headers,
-        )
-        try:
-            res.raise_for_status()
-        except httpx.HTTPStatusError as ex:
-            if ex.response.status_code == 403:
-                await self.async_refresh_token()
-                headers = await self.__get_headers()
-                res = await client.get(
-                    UNIKEY_API_URL_BASE + "/api/v2/users/" + self._user_id + "/locks",
-                    headers=headers,
-                )
-                try:
-                    res.raise_for_status()
-                except httpx.HTTPStatusError as retryex:
-                    if retryex.response.status_code == 403:
-                        raise KevoAuthError()
-                    else:
-                        raise
-                raise KevoAuthError()
-            elif ex.response.status_code == 401:
-                raise KevoPermissionError()
-            else:
-                raise
-        json_response = res.json()
-        lock_response = json_response["locks"]
+        response = await self._api_get(f"/api/v2/users/{self._user_id}/locks");
+        locks = response["locks"]
         self._devices = []
 
-        for lock in lock_response:
+        for lock in locks:
             self._devices.append(
                 KevoLock(
                     self,
@@ -652,21 +643,18 @@ class KevoLock:
     async def lock(self):
         """Lock the lock."""
         return await self._api._api_post(
-            "/api/v2/users/"
-            + self._api._user_id
-            + "/locks/"
-            + self._lock_id
-            + "/commands",
+            f"/api/v2/users/{self._api._user_id}/locks/{self._lock_id}/commands",
             {"command": LOCK_STATE_LOCK},
         )
 
     async def unlock(self):
         """Unlock the lock."""
         return await self._api._api_post(
-            "/api/v2/users/"
-            + self._api._user_id
-            + "/locks/"
-            + self._lock_id
-            + "/commands",
+            f"/api/v2/users/{self._api._user_id}/locks/{self._lock_id}/commands",
             {"command": LOCK_STATE_UNLOCK},
         )
+
+    async def refresh(self) -> None:
+        """Refresh the lock properties"""
+        lock = await self._api.get_lock(self._lock_id)
+        self.__dict__.update(lock.__dict__)
