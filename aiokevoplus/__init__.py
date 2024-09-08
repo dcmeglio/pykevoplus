@@ -56,7 +56,7 @@ class KevoPermissionError(KevoError):
 class KevoApi:
     MAX_RECONNECT_DELAY: int = 240
 
-    def __init__(self, device_id: uuid.UUID = None):
+    def __init__(self, device_id: uuid.UUID = None, client: httpx.AsyncClient = None):
         self._expires_at = 0
         self._refresh_token: str = None
         self._id_token: str = None
@@ -67,6 +67,9 @@ class KevoApi:
         self._callbacks: list[Callable] = []
         self._websocket = None
         self._disconnecting = False
+        self._client = client
+        if self._client is None:
+            self._client = httpx.AsyncClient()
 
         if self._device_id is None:
             self._device_id = uuid.uuid4()
@@ -156,7 +159,7 @@ class KevoApi:
 
     async def __get_server_nonce(self) -> str:
         """Retrieve a server nonce."""
-        client = httpx.AsyncClient()
+        client = self._client
         client.headers = {"Content-Type": "application/json"}
         res = await client.post(
             UNIKEY_API_URL_BASE + "/api/v2/nonces",
@@ -187,7 +190,7 @@ class KevoApi:
 
     async def async_refresh_token(self) -> None:
         """Refresh the access token."""
-        client = httpx.AsyncClient()
+        client = self._client
         post_params = {
             "client_id": CLIENT_ID,
             "client_secret": CLIENT_SECRET,
@@ -206,7 +209,7 @@ class KevoApi:
 
     async def _api_post(self, url: str, body: dict):
         """POST to the API."""
-        client = httpx.AsyncClient()
+        client = self._client
 
         # Reauth if needed
         if self._expires_at < time.time() + 100:
@@ -245,7 +248,7 @@ class KevoApi:
 
     async def get_locks(self) -> list["KevoLock"]:
         """Retrieve the list of available locks."""
-        client = httpx.AsyncClient()
+        client = self._client
         headers = await self.__get_headers()
 
         # Reauth if needed
@@ -298,7 +301,7 @@ class KevoApi:
 
     async def login(self, username: str, password: str) -> None:
         """Login to the API."""
-        client = httpx.AsyncClient()
+        client = self._client
         code_verifier, code_challenge = pkce.generate_pkce_pair()
         certificate = self.__generate_certificate()
         md5hash = hashlib.md5(os.urandom(32))
