@@ -10,6 +10,7 @@ import os
 import random
 import re
 import secrets
+import ssl
 import time
 from typing import Callable
 import uuid
@@ -56,7 +57,7 @@ class KevoPermissionError(KevoError):
 class KevoApi:
     MAX_RECONNECT_DELAY: int = 240
 
-    def __init__(self, device_id: uuid.UUID = None, client: httpx.AsyncClient = None):
+    def __init__(self, device_id: uuid.UUID = None, client: httpx.AsyncClient = None, ssl_context: ssl.SSLContext = None):
         self._expires_at = 0
         self._refresh_token: str = None
         self._id_token: str = None
@@ -68,6 +69,10 @@ class KevoApi:
         self._websocket = None
         self._disconnecting = False
         self._client = client
+        self._ssl_context = ssl_context
+        if self._ssl_context is None:
+            self._ssl_context = ssl.create_default_context()
+
         if self._client is None:
             self._client = httpx.AsyncClient()
 
@@ -500,6 +505,7 @@ class KevoApi:
             UNIKEY_WS_URL_BASE + "/v3/web/" + self._user_id + query_string,
             ping_interval=10,
             user_agent_header="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+            ssl=self._ssl_context
         ):
             self._reconnect_attempts = 0
             self._websocket = websocket
