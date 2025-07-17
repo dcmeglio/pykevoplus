@@ -57,7 +57,7 @@ class KevoPermissionError(KevoError):
 class KevoApi:
     MAX_RECONNECT_DELAY: int = 240
 
-    def __init__(self, device_id: uuid.UUID = None, client: httpx.AsyncClient = None, ssl_context: ssl.SSLContext = None):
+    def __init__(self, device_id: uuid.UUID = None, client: httpx.AsyncClient, ssl_context: ssl.SSLContext):
         self._expires_at = 0
         self._refresh_token: str = None
         self._id_token: str = None
@@ -68,13 +68,12 @@ class KevoApi:
         self._callbacks: list[Callable] = []
         self._websocket = None
         self._disconnecting = False
+        if client is None:
+            raise ValueError("httpx.AsyncClient must be provided")
+        if ssl_context is None:
+            raise ValueError("ssl.SSLContext must be provided")
         self._client = client
         self._ssl_context = ssl_context
-        if self._ssl_context is None:
-            self._ssl_context = ssl.create_default_context()
-
-        if self._client is None:
-            self._client = httpx.AsyncClient()
 
         if self._device_id is None:
             self._device_id = uuid.uuid4()
